@@ -23,7 +23,8 @@ import {
   BillingRecord, 
   InstructionRecord, 
   WorkflowItem, 
-  SDOfficeFile 
+  SDOfficeFile,
+  TrashItem 
 } from './types';
 import { 
   initialStaff, 
@@ -34,7 +35,8 @@ import {
   initialBills, 
   initialInstructions, 
   initialWorkflow, 
-  initialSDOffice 
+  initialSDOffice,
+  initialTrash 
 } from './initialData';
 import { 
   exportToGoogleSheets, 
@@ -43,6 +45,14 @@ import {
   createGoogleTask 
 } from './workspace';
 import { queryMapsGroundingLocation } from './geminiMaps';
+import { downloadExcelFile, downloadPdfReport } from './exportUtils';
+import { ConfirmationModal, ConfirmState } from './components/ConfirmationModal';
+import { ProjectModal } from './components/ProjectModal';
+import { TenderModal } from './components/TenderModal';
+import { BillingModal } from './components/BillingModal';
+import { WorkflowModal } from './components/WorkflowModal';
+import { SDOfficeModal } from './components/SDOfficeModal';
+import { AssetModal } from './components/AssetModal';
 
 export default function App() {
   // Authentication & Users
@@ -54,7 +64,7 @@ export default function App() {
   const [showPassword, setShowPassword] = useState(false);
 
   // App Navigation
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'jurisdiction' | 'tender_billing' | 'projects' | 'instructions' | 'workflow' | 'sdoffice' | 'staff' | 'my_tasks'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'jurisdiction' | 'tender_billing' | 'projects' | 'instructions' | 'workflow' | 'sdoffice' | 'staff' | 'trash' | 'my_tasks'>('dashboard');
 
   // Firestore Synchronized State
   const [staffList, setStaffList] = useState<StaffMember[]>(initialStaff);
@@ -66,6 +76,25 @@ export default function App() {
   const [instructionsList, setInstructionsList] = useState<InstructionRecord[]>(initialInstructions);
   const [workflowList, setWorkflowList] = useState<WorkflowItem[]>(initialWorkflow);
   const [sdOfficeList, setSdOfficeList] = useState<SDOfficeFile[]>(initialSDOffice);
+  const [trashList, setTrashList] = useState<TrashItem[]>(initialTrash);
+
+  // Modal Editing and Selection States
+  const [editingProject, setEditingProject] = useState<ProjectRecord | null>(null);
+  const [editingTender, setEditingTender] = useState<TenderRecord | null>(null);
+  const [editingBilling, setBillingItem] = useState<BillingRecord | null>(null);
+  const [editingWorkflow, setEditingWorkflow] = useState<WorkflowItem | null>(null);
+  const [editingSDOffice, setEditingSDOffice] = useState<SDOfficeFile | null>(null);
+  const [editingAsset, setEditingAsset] = useState<{ item: RoadAsset | StructureAsset | null; type: 'road' | 'structure' }>({ item: null, type: 'road' });
+  const [showAssetModal, setShowAssetModal] = useState(false);
+
+  // Double Confirmation Modal State
+  const [confirmState, setConfirmState] = useState<ConfirmState>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+    doubleConfirmRequired: true
+  });
 
   // Filter and Interactive States
   const [assetCategory, setAssetCategory] = useState<'roads' | 'bridges' | 'buildings'>('roads');
@@ -191,12 +220,48 @@ export default function App() {
       }
     });
 
+    const unsubRoads = onSnapshot(doc(db, 'system', 'roads_state'), (snapshot) => {
+      if (snapshot.exists()) {
+        setRoadsList(snapshot.data().list || initialRoads);
+      } else {
+        setDoc(doc(db, 'system', 'roads_state'), { list: initialRoads });
+      }
+    });
+
+    const unsubStructures = onSnapshot(doc(db, 'system', 'structures_state'), (snapshot) => {
+      if (snapshot.exists()) {
+        setStructuresList(snapshot.data().list || initialStructures);
+      } else {
+        setDoc(doc(db, 'system', 'structures_state'), { list: initialStructures });
+      }
+    });
+
+    const unsubSDOffice = onSnapshot(doc(db, 'system', 'sdoffice_state'), (snapshot) => {
+      if (snapshot.exists()) {
+        setSdOfficeList(snapshot.data().list || initialSDOffice);
+      } else {
+        setDoc(doc(db, 'system', 'sdoffice_state'), { list: initialSDOffice });
+      }
+    });
+
+    const unsubTrash = onSnapshot(doc(db, 'system', 'trash_state'), (snapshot) => {
+      if (snapshot.exists()) {
+        setTrashList(snapshot.data().list || initialTrash);
+      } else {
+        setDoc(doc(db, 'system', 'trash_state'), { list: initialTrash });
+      }
+    });
+
     return () => {
       unsubProjects();
       unsubTenders();
       unsubBills();
       unsubInstructions();
       unsubWorkflow();
+      unsubRoads();
+      unsubStructures();
+      unsubSDOffice();
+      unsubTrash();
     };
   }, []);
 
@@ -207,6 +272,134 @@ export default function App() {
     } catch (err) {
       console.warn("Offline/Cloud sync fallback:", err);
     }
+  };
+
+  // Double confirmation helper
+  const triggerDoubleConfirm = (
+    title: string,
+    message: string,
+    onConfirm: () => void,
+    actionType: 'delete' | 'update' | 'restore' = 'delete',
+    itemName?: string
+  ) => {
+    setConfirmState({
+      isOpen: true,
+      title,
+      message,
+      actionType,
+      itemName,
+      onConfirm: () => {
+        onConfirm();
+        setConfirmState(prev => ({ ...prev, isOpen: false }));
+      },
+      doubleConfirmRequired: true
+    });
+  };
+
+  // Move item to trash (Soft Delete - admin or authorized user)
+  const moveToTrash = async (
+    itemType: TrashItem['itemType'],
+    originalId: string,
+    title: string,
+    data: any
+  ) => {
+    const newTrashItem: TrashItem = {
+      id: `TRASH-${Date.now()}`,
+      originalId,
+      itemType,
+      title,
+      deletedAt: new Date().toISOString(),
+      deletedBy: currentUser?.name || 'Authorized User',
+      data
+    };
+
+    const updatedTrash = [newTrashItem, ...trashList];
+    setTrashList(updatedTrash);
+    await syncToCloud('trash_state', updatedTrash);
+  };
+
+  // Restore item from trash (Admin only)
+  const handleRestoreFromTrash = async (item: TrashItem) => {
+    triggerDoubleConfirm(
+      "পুনরুদ্ধার নিশ্চিতকরণ",
+      `আপনি কি নিশ্চিত যে "${item.title}" রেকর্ডটি ট্র্যাশ থেকে মূল তালিকায় পুনরুদ্ধার করতে চান?`,
+      async () => {
+        const remainingTrash = trashList.filter(t => t.id !== item.id);
+        setTrashList(remainingTrash);
+        await syncToCloud('trash_state', remainingTrash);
+
+        if (item.itemType === 'project') {
+          const updated = [item.data as ProjectRecord, ...projectsList];
+          setProjectsList(updated);
+          await syncToCloud('projects_state', updated);
+        } else if (item.itemType === 'tender') {
+          const updated = [item.data as TenderRecord, ...tendersList];
+          setTendersList(updated);
+          await syncToCloud('tenders_state', updated);
+        } else if (item.itemType === 'billing') {
+          const updated = [item.data as BillingRecord, ...billingList];
+          setBillingList(updated);
+          await syncToCloud('bills_state', updated);
+        } else if (item.itemType === 'instruction') {
+          const updated = [item.data as InstructionRecord, ...instructionsList];
+          setInstructionsList(updated);
+          await syncToCloud('instructions_state', updated);
+        } else if (item.itemType === 'workflow') {
+          const updated = [item.data as WorkflowItem, ...workflowList];
+          setWorkflowList(updated);
+          await syncToCloud('workflow_state', updated);
+        } else if (item.itemType === 'sdoffice') {
+          const updated = [item.data as SDOfficeFile, ...sdOfficeList];
+          setSdOfficeList(updated);
+          await syncToCloud('sdoffice_state', updated);
+        } else if (item.itemType === 'road') {
+          const updated = [item.data as RoadAsset, ...roadsList];
+          setRoadsList(updated);
+          await syncToCloud('roads_state', updated);
+        } else if (item.itemType === 'structure') {
+          const updated = [item.data as StructureAsset, ...structuresList];
+          setStructuresList(updated);
+          await syncToCloud('structures_state', updated);
+        }
+        setStatusMessage(`"${item.title}" সফলভাবে পুনরুদ্ধার করা হয়েছে!`);
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      'restore',
+      item.title
+    );
+  };
+
+  // Permanent delete from trash (Admin only)
+  const handlePermanentDelete = (item: TrashItem) => {
+    triggerDoubleConfirm(
+      "স্থায়ীভাবে ডিলিট নিশ্চিতকরণ",
+      `সতর্কবার্তা: "${item.title}" রেকর্ডটি স্থায়ীভাবে ডাটাবেজ থেকে মুছে ফেলা হবে। এটি আর পুনরুদ্ধার করা যাবে না।`,
+      async () => {
+        const remainingTrash = trashList.filter(t => t.id !== item.id);
+        setTrashList(remainingTrash);
+        await syncToCloud('trash_state', remainingTrash);
+        setStatusMessage(`"${item.title}" স্থায়ীভাবে মুছে ফেলা হয়েছে।`);
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      'delete',
+      item.title
+    );
+  };
+
+  // Empty entire trash (Admin only)
+  const handleEmptyTrash = () => {
+    triggerDoubleConfirm(
+      "সমস্ত ট্র্যাশ খালি করুন",
+      "সতর্কবার্তা: ট্র্যাশে থাকা সমস্ত মুছে ফেলা রেকর্ড চিরতরে ডিলিট হয়ে যাবে। আপনি কি নিশ্চিত?",
+      async () => {
+        setTrashList([]);
+        await syncToCloud('trash_state', []);
+        setStatusMessage("ট্র্যাশ সফলভাবে খালি করা হয়েছে।");
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      'delete',
+      'সমস্ত ট্র্যাশ'
+    );
   };
 
   // Login handler
@@ -367,40 +560,383 @@ export default function App() {
     setIsMapsLoading(false);
   };
 
-  // Instructions Action
-  const handleSaveInstruction = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const targetStaff = staffList.find(s => s.name === instructionForm.targetStaff) || staffList[1];
-    const newIns: InstructionRecord = {
-      id: `INS-${Date.now().toString().slice(-4)}`,
-      targetStaff: targetStaff.name,
-      phone: targetStaff.phone,
-      section: targetStaff.section,
-      projectRef: instructionForm.projectRef || 'General Road/Bridge',
-      subject: instructionForm.subject,
-      fileLink: instructionForm.fileLink,
-      issueDate: instructionForm.issueDate,
-      reminderDate: instructionForm.reminderDate,
-      status: 'Pending',
-      seen: false
-    };
+  // Project CRUD Handlers
+  const handleSaveProject = async (projectData: Partial<ProjectRecord>) => {
+    triggerDoubleConfirm(
+      editingProject ? "প্রকল্প আপডেট নিশ্চিতকরণ" : "নতুন প্রকল্প যুক্তকরণ",
+      `আপনি কি নিশ্চিত যে "${projectData.projectName}" প্রকল্পটি সংরক্ষণ করতে চান?`,
+      async () => {
+        if (editingProject) {
+          const updated = projectsList.map(p => p.id === editingProject.id ? { ...p, ...projectData } as ProjectRecord : p);
+          setProjectsList(updated);
+          await syncToCloud('projects_state', updated);
+          setStatusMessage("প্রকল্প সফলভাবে আপডেট করা হয়েছে!");
+        } else {
+          const newProj: ProjectRecord = {
+            id: `PRJ-${Date.now().toString().slice(-4)}`,
+            tenderNo: projectData.tenderNo || `NIT-${Date.now().toString().slice(-4)}`,
+            section: projectData.section || 'Ranaghat Section',
+            projectName: projectData.projectName || 'New Project',
+            assetName: projectData.assetName || '',
+            startCh: projectData.startCh || '0.00',
+            endCh: projectData.endCh || '1.00',
+            length: Number(projectData.length) || 1.0,
+            agency: projectData.agency || '',
+            tenderedAmt: Number(projectData.tenderedAmt) || 0,
+            progress: Number(projectData.progress) || 0,
+            stage: projectData.stage || 'In Progress',
+            dlp1: projectData.dlp1 || '',
+            dlp2: projectData.dlp2 || '',
+            dlpLast: projectData.dlpLast || '',
+            lastUpdated: new Date().toISOString().slice(0, 10)
+          };
+          const updated = [newProj, ...projectsList];
+          setProjectsList(updated);
+          await syncToCloud('projects_state', updated);
+          setStatusMessage("নতুন প্রকল্প সফলভাবে সিস্টেমে যুক্ত হয়েছে!");
+        }
+        setShowAddProjectModal(false);
+        setEditingProject(null);
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      editingProject ? 'update' : 'update',
+      projectData.projectName
+    );
+  };
 
-    const updated = [newIns, ...instructionsList];
-    setInstructionsList(updated);
-    await syncToCloud('instructions_state', updated);
-    setShowInstructionModal(false);
+  const handleDeleteProject = (project: ProjectRecord) => {
+    triggerDoubleConfirm(
+      "প্রকল্প অপসারণ নিশ্চিতকরণ",
+      `আপনি কি "${project.projectName}" প্রকল্পটি মুছে ট্র্যাশে সরাতে চান? শুধুমাত্র এডমিন এটি ট্র্যাশ থেকে উদ্ধার করতে পারবেন।`,
+      async () => {
+        const remaining = projectsList.filter(p => p.id !== project.id);
+        setProjectsList(remaining);
+        await syncToCloud('projects_state', remaining);
+        await moveToTrash('project', project.id, project.projectName, project);
+        setStatusMessage(`"${project.projectName}" ট্র্যাশে সরানো হয়েছে।`);
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      'delete',
+      project.projectName
+    );
+  };
 
-    // Auto-sync with Google Tasks & Calendar if enabled
-    if (workspaceToken) {
-      try {
-        await createGoogleTask(`[নির্দেশ] ${newIns.subject}`, `প্রাপক: ${targetStaff.name}, সেকশন: ${targetStaff.section}`, newIns.reminderDate);
-        await createGoogleCalendarEvent(`[PWDTE নির্দেশ] ${newIns.subject}`, `রেফারেন্স: ${newIns.projectRef}`, newIns.reminderDate);
-      } catch (err) {
-        console.warn("Background workspace sync:", err);
-      }
-    }
+  // Tender CRUD Handlers
+  const handleSaveTender = async (tenderData: Partial<TenderRecord>) => {
+    triggerDoubleConfirm(
+      editingTender ? "টেন্ডার আপডেট নিশ্চিতকরণ" : "নতুন টেন্ডার রেকর্ড যুক্তকরণ",
+      `আপনি কি "${tenderData.projectName}" টেন্ডার রেকর্ডটি সংরক্ষণ করতে চান?`,
+      async () => {
+        if (editingTender) {
+          const updated = tendersList.map(t => t.id === editingTender.id ? { ...t, ...tenderData } as TenderRecord : t);
+          setTendersList(updated);
+          await syncToCloud('tenders_state', updated);
+          setStatusMessage("টেন্ডার রেকর্ড সফলভাবে আপডেট করা হয়েছে!");
+        } else {
+          const newTender: TenderRecord = {
+            id: `TND-${Date.now().toString().slice(-4)}`,
+            tenderNo: tenderData.tenderNo || `NIT-${Date.now().toString().slice(-4)}`,
+            section: tenderData.section || 'Ranaghat Section',
+            assetType: tenderData.assetType || 'Road',
+            projectName: tenderData.projectName || 'New Tender Work',
+            estimatedCost: Number(tenderData.estimatedCost) || 0,
+            tenderedAmt: Number(tenderData.tenderedAmt) || 0,
+            agency: tenderData.agency || '',
+            csStatus: tenderData.csStatus || 'Pending',
+            woServed: tenderData.woServed || 'No',
+            status: tenderData.status || 'Tender in Process',
+            fy: tenderData.fy || '2026-2027',
+            publishDate: tenderData.publishDate || new Date().toISOString().slice(0, 10),
+            woDate: tenderData.woDate || ''
+          };
+          const updated = [newTender, ...tendersList];
+          setTendersList(updated);
+          await syncToCloud('tenders_state', updated);
+          setStatusMessage("নতুন টেন্ডার সফলভাবে যুক্ত হয়েছে!");
+        }
+        setShowTenderModal(false);
+        setEditingTender(null);
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      editingTender ? 'update' : 'update',
+      tenderData.projectName
+    );
+  };
 
-    alert("অফিসিয়াল নির্দেশ সফলভাবে জারি করা হয়েছে এবং সার্ভারে সংরক্ষিত হয়েছে!");
+  const handleDeleteTender = (tender: TenderRecord) => {
+    triggerDoubleConfirm(
+      "টেন্ডার মুছে ফেলা নিশ্চিতকরণ",
+      `আপনি কি "${tender.projectName}" টেন্ডার রেকর্ডটি মুছে ট্র্যাশে সরাতে চান?`,
+      async () => {
+        const remaining = tendersList.filter(t => t.id !== tender.id);
+        setTendersList(remaining);
+        await syncToCloud('tenders_state', remaining);
+        await moveToTrash('tender', tender.id, tender.projectName, tender);
+        setStatusMessage(`"${tender.projectName}" ট্র্যাশে সরানো হয়েছে।`);
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      'delete',
+      tender.projectName
+    );
+  };
+
+  // Billing CRUD Handlers
+  const handleSaveBilling = async (billingData: Partial<BillingRecord>) => {
+    triggerDoubleConfirm(
+      editingBilling ? "বিল আপডেট নিশ্চিতকরণ" : "নতুন RA বিল যুক্তকরণ",
+      `আপনি কি "${billingData.billNo}" বিল রেকর্ডটি সংরক্ষণ করতে চান?`,
+      async () => {
+        if (editingBilling) {
+          const updated = billingList.map(b => b.id === editingBilling.id ? { ...b, ...billingData } as BillingRecord : b);
+          setBillingList(updated);
+          await syncToCloud('bills_state', updated);
+          setStatusMessage("বিল রেকর্ড সফলভাবে আপডেট করা হয়েছে!");
+        } else {
+          const newBill: BillingRecord = {
+            id: `BILL-${Date.now().toString().slice(-4)}`,
+            tenderNo: billingData.tenderNo || '',
+            projectName: billingData.projectName || 'RA Bill Work',
+            billNo: billingData.billNo || '1st RA Bill',
+            amount: Number(billingData.amount) || 0,
+            usedMBs: billingData.usedMBs || '',
+            status: billingData.status || 'Under Scrutiny',
+            fy: billingData.fy || '2026-2027',
+            date: billingData.date || new Date().toISOString().slice(0, 10),
+            siteInspectedOn: billingData.siteInspectedOn || '',
+            verifiedOn: billingData.verifiedOn || '',
+            remarksJE: billingData.remarksJE || ''
+          };
+          const updated = [newBill, ...billingList];
+          setBillingList(updated);
+          await syncToCloud('bills_state', updated);
+          setStatusMessage("নতুন বিল সফলভাবে ডাটাবেজে যুক্ত হয়েছে!");
+        }
+        setShowBillingModal(false);
+        setBillingItem(null);
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      editingBilling ? 'update' : 'update',
+      billingData.billNo
+    );
+  };
+
+  const handleDeleteBilling = (bill: BillingRecord) => {
+    triggerDoubleConfirm(
+      "বিল মুছে ফেলা নিশ্চিতকরণ",
+      `আপনি কি "${bill.billNo} (${bill.projectName})" বিল রেকর্ডটি মুছে ট্র্যাশে পাঠাতে চান?`,
+      async () => {
+        const remaining = billingList.filter(b => b.id !== bill.id);
+        setBillingList(remaining);
+        await syncToCloud('bills_state', remaining);
+        await moveToTrash('billing', bill.id, `${bill.billNo} - ${bill.projectName}`, bill);
+        setStatusMessage(`বিল "${bill.billNo}" ট্র্যাশে পাঠানো হয়েছে।`);
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      'delete',
+      bill.billNo
+    );
+  };
+
+  // Workflow CRUD Handlers
+  const handleSaveWorkflow = async (workflowData: Partial<WorkflowItem>) => {
+    triggerDoubleConfirm(
+      editingWorkflow ? "চিঠী আপডেট নিশ্চিতকরণ" : "নতুন চিঠী সংরক্ষণ",
+      `আপনি কি "${workflowData.subject}" চিঠীটি রেকর্ড করতে চান?`,
+      async () => {
+        if (editingWorkflow) {
+          const updated = workflowList.map(w => w.id === editingWorkflow.id ? { ...w, ...workflowData } as WorkflowItem : w);
+          setWorkflowList(updated);
+          await syncToCloud('workflow_state', updated);
+          setStatusMessage("ওয়ার্কফ্লো আপডেট সফল হয়েছে!");
+        } else {
+          const newItem: WorkflowItem = {
+            id: `WF-${Date.now().toString().slice(-4)}`,
+            memoNo: workflowData.memoNo || `MEMO-${Date.now().toString().slice(-4)}`,
+            date: workflowData.date || new Date().toISOString().slice(0, 10),
+            project: workflowData.project || 'General Office',
+            from: workflowData.from || 'SDO Ranaghat',
+            to: workflowData.to || 'EE Nadia Highway Div',
+            subject: workflowData.subject || 'Office Correspondence',
+            status: workflowData.status || 'Pending'
+          };
+          const updated = [newItem, ...workflowList];
+          setWorkflowList(updated);
+          await syncToCloud('workflow_state', updated);
+          setStatusMessage("নতুন চিঠী সফলভাবে ওয়ার্কফ্লোতে যুক্ত হয়েছে!");
+        }
+        setShowWorkflowModal(false);
+        setEditingWorkflow(null);
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      editingWorkflow ? 'update' : 'update',
+      workflowData.subject
+    );
+  };
+
+  const handleDeleteWorkflow = (item: WorkflowItem) => {
+    triggerDoubleConfirm(
+      "চিঠী মুছে ফেলা নিশ্চিতকরণ",
+      `আপনি কি "${item.memoNo} - ${item.subject}" মুছে ট্র্যাশে সরাতে চান?`,
+      async () => {
+        const remaining = workflowList.filter(w => w.id !== item.id);
+        setWorkflowList(remaining);
+        await syncToCloud('workflow_state', remaining);
+        await moveToTrash('workflow', item.id, `${item.memoNo} - ${item.subject}`, item);
+        setStatusMessage(`চিঠীটি ট্র্যাশে সরানো হয়েছে।`);
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      'delete',
+      item.subject
+    );
+  };
+
+  // SD Office CRUD Handlers
+  const handleSaveSDOffice = async (fileData: Partial<SDOfficeFile>) => {
+    triggerDoubleConfirm(
+      editingSDOffice ? "নথি আপডেট নিশ্চিতকরণ" : "নতুন অফিস নথি সংরক্ষণ",
+      `আপনি কি "${fileData.subject}" নথিটি রেকর্ড করতে চান?`,
+      async () => {
+        if (editingSDOffice) {
+          const updated = sdOfficeList.map(f => f.id === editingSDOffice.id ? { ...f, ...fileData } as SDOfficeFile : f);
+          setSdOfficeList(updated);
+          await syncToCloud('sdoffice_state', updated);
+          setStatusMessage("অফিস নথি সফলভাবে আপডেট হয়েছে!");
+        } else {
+          const newFile: SDOfficeFile = {
+            id: `SDO-${Date.now().toString().slice(-4)}`,
+            memoNo: fileData.memoNo || `SDO/RNG/${Date.now().toString().slice(-4)}`,
+            date: fileData.date || new Date().toISOString().slice(0, 10),
+            subject: fileData.subject || 'SD Office File',
+            senderReceiver: fileData.senderReceiver || 'Office',
+            status: fileData.status || 'In Process',
+            category: fileData.category || 'General Administration',
+            fileLink: fileData.fileLink || ''
+          };
+          const updated = [newFile, ...sdOfficeList];
+          setSdOfficeList(updated);
+          await syncToCloud('sdoffice_state', updated);
+          setStatusMessage("নতুন নথি সফলভাবে সংরক্ষিত হয়েছে!");
+        }
+        setShowSecurityModal(false);
+        setEditingSDOffice(null);
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      editingSDOffice ? 'update' : 'update',
+      fileData.subject
+    );
+  };
+
+  const handleDeleteSDOffice = (file: SDOfficeFile) => {
+    triggerDoubleConfirm(
+      "অফিস ফাইল মুছে ফেলা নিশ্চিতকরণ",
+      `আপনি কি "${file.memoNo} - ${file.subject}" নথিটি মুছে ট্র্যাশে পাঠাতে চান?`,
+      async () => {
+        const remaining = sdOfficeList.filter(f => f.id !== file.id);
+        setSdOfficeList(remaining);
+        await syncToCloud('sdoffice_state', remaining);
+        await moveToTrash('sdoffice', file.id, `${file.memoNo} - ${file.subject}`, file);
+        setStatusMessage(`নথিটি ট্র্যাশে সরানো হয়েছে।`);
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      'delete',
+      file.subject
+    );
+  };
+
+  // Asset CRUD Handlers
+  const handleSaveAsset = async (assetData: any, assetType: 'road' | 'structure') => {
+    triggerDoubleConfirm(
+      editingAsset.item ? "অ্যাসেট তথ্য আপডেট" : "নতুন অ্যাসেট অন্তর্ভুক্তি",
+      `আপনি কি "${assetData.name}" অ্যাসেটটি সংরক্ষণ করতে চান?`,
+      async () => {
+        if (assetType === 'road') {
+          if (editingAsset.item) {
+            const updated = roadsList.map(r => r.name === editingAsset.item?.name ? { ...r, ...assetData } as RoadAsset : r);
+            setRoadsList(updated);
+            await syncToCloud('roads_state', updated);
+          } else {
+            const newRoad: RoadAsset = {
+              name: assetData.name || 'New Road',
+              section: assetData.section || 'Ranaghat Section',
+              length: Number(assetData.length) || 1.0,
+              width: Number(assetData.width) || 3.75,
+              startCh: assetData.startCh || '0.00',
+              endCh: assetData.endCh || '1.00',
+              coordinates: assetData.coordinates || ''
+            };
+            const updated = [newRoad, ...roadsList];
+            setRoadsList(updated);
+            await syncToCloud('roads_state', updated);
+          }
+        } else {
+          if (editingAsset.item) {
+            const updated = structuresList.map(s => s.name === editingAsset.item?.name ? { ...s, ...assetData } as StructureAsset : s);
+            setStructuresList(updated);
+            await syncToCloud('structures_state', updated);
+          } else {
+            const newStructure: StructureAsset = {
+              name: assetData.name || 'New Structure',
+              type: assetData.type || 'Bridge',
+              section: assetData.section || 'Ranaghat Section',
+              location: assetData.location || '',
+              length: Number(assetData.length) || 10,
+              spanCount: Number(assetData.spanCount) || 1
+            };
+            const updated = [newStructure, ...structuresList];
+            setStructuresList(updated);
+            await syncToCloud('structures_state', updated);
+          }
+        }
+        setShowAssetModal(false);
+        setEditingAsset({ item: null, type: 'road' });
+        setStatusMessage("অ্যাসেট ডাটাবেজ সফলভাবে আপডেট হয়েছে!");
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      editingAsset.item ? 'update' : 'update',
+      assetData.name
+    );
+  };
+
+  const handleDeleteAsset = (asset: RoadAsset | StructureAsset, type: 'road' | 'structure') => {
+    triggerDoubleConfirm(
+      "অ্যাসেট মুছে ফেলা নিশ্চিতকরণ",
+      `আপনি কি "${asset.name}" অ্যাসেটটি মুছে ট্র্যাশে সরাতে চান?`,
+      async () => {
+        if (type === 'road') {
+          const remaining = roadsList.filter(r => r.name !== asset.name);
+          setRoadsList(remaining);
+          await syncToCloud('roads_state', remaining);
+          await moveToTrash('road', asset.name, asset.name, asset);
+        } else {
+          const remaining = structuresList.filter(s => s.name !== asset.name);
+          setStructuresList(remaining);
+          await syncToCloud('structures_state', remaining);
+          await moveToTrash('structure', asset.name, asset.name, asset);
+        }
+        setStatusMessage(`"${asset.name}" ট্র্যাশে সরানো হয়েছে।`);
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      'delete',
+      asset.name
+    );
+  };
+
+  // Instruction delete handler
+  const handleDeleteInstruction = (ins: InstructionRecord) => {
+    triggerDoubleConfirm(
+      "নির্দেশ মুছে ফেলা নিশ্চিতকরণ",
+      `আপনি কি "${ins.subject}" নির্দেশটি মুছে ট্র্যাশে পাঠাতে চান?`,
+      async () => {
+        const remaining = instructionsList.filter(i => i.id !== ins.id);
+        setInstructionsList(remaining);
+        await syncToCloud('instructions_state', remaining);
+        await moveToTrash('instruction', ins.id, ins.subject, ins);
+        setStatusMessage("নির্দেশটি ট্র্যাশে সরানো হয়েছে।");
+        setTimeout(() => setStatusMessage(null), 4000);
+      },
+      'delete',
+      ins.subject
+    );
   };
 
   const handleReplySubmit = async (e: React.FormEvent) => {
@@ -638,12 +1174,28 @@ export default function App() {
               </button>
 
               {currentUser.role === 'admin' && (
-                <button 
-                  onClick={() => setActiveTab('staff')} 
-                  className={`w-full text-left flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-l-4 ${activeTab === 'staff' ? 'bg-indigo-50 text-indigo-700 border-indigo-700' : 'text-slate-600 hover:bg-slate-50 border-transparent'}`}
-                >
-                  <i className="fa-solid fa-address-book w-4 text-center"></i> স্টাফ ডিরেক্টরি
-                </button>
+                <>
+                  <button 
+                    onClick={() => setActiveTab('staff')} 
+                    className={`w-full text-left flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-l-4 ${activeTab === 'staff' ? 'bg-indigo-50 text-indigo-700 border-indigo-700' : 'text-slate-600 hover:bg-slate-50 border-transparent'}`}
+                  >
+                    <i className="fa-solid fa-address-book w-4 text-center"></i> স্টাফ ডিরেক্টরি
+                  </button>
+
+                  <button 
+                    onClick={() => setActiveTab('trash')} 
+                    className={`w-full text-left flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold transition border-l-4 ${activeTab === 'trash' ? 'bg-rose-50 text-rose-700 border-rose-700' : 'text-slate-600 hover:bg-slate-50 border-transparent'}`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <i className="fa-solid fa-trash-can w-4 text-center text-rose-600"></i> ট্র্যাশ বিন (Trash)
+                    </div>
+                    {trashList.length > 0 && (
+                      <span className="bg-rose-600 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full">
+                        {trashList.length}
+                      </span>
+                    )}
+                  </button>
+                </>
               )}
             </div>
           )}
@@ -773,7 +1325,7 @@ export default function App() {
                   <h2 className="text-base font-bold text-slate-800">রোড ও ইনফ্রাস্ট্রাকচার অ্যাসেট মাস্টার</h2>
                   <p className="text-xs text-slate-500">নামের ওপর ক্লিক করে Work Prescription ও হিস্ট্রি দেখুন</p>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <select 
                     value={assetSectionFilter} 
                     onChange={(e) => setAssetSectionFilter(e.target.value)}
@@ -793,6 +1345,48 @@ export default function App() {
                     <option value="bridges">ব্রিজসমূহ (Bridges)</option>
                     <option value="buildings">বিল্ডিং ও ইয়ার্ড (Buildings)</option>
                   </select>
+
+                  <button 
+                    onClick={() => {
+                      const headers = assetCategory === 'roads' 
+                        ? ["সেকশন", "সড়কের নাম", "দৈর্ঘ্য (Km)", "প্রস্থ (m)", "Start Ch.", "End Ch."] 
+                        : ["সেকশন", "ক্যাটাগরি", "নাম", "লোকেশন", "দৈর্ঘ্য (m)"];
+                      const rows = assetCategory === 'roads'
+                        ? roadsList.filter(r => assetSectionFilter === 'all' || r.section === assetSectionFilter).map(r => [r.section, r.name, r.length, r.width, r.startCh, r.endCh])
+                        : structuresList.filter(s => assetCategory === 'bridges' ? s.type === 'Bridge' : s.type === 'Building').filter(s => assetSectionFilter === 'all' || s.section === assetSectionFilter).map(s => [s.section, s.type, s.name, s.location, s.length || 0]);
+                      downloadExcelFile(`Assets_${assetCategory}_${new Date().toISOString().slice(0, 10)}`, 'Assets', headers, rows);
+                    }}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="Excel Download"
+                  >
+                    <i className="fa-solid fa-file-excel"></i> Excel
+                  </button>
+
+                  <button 
+                    onClick={() => {
+                      const headers = assetCategory === 'roads' 
+                        ? ["সেকশন", "সড়কের নাম", "দৈর্ঘ্য (Km)", "প্রস্থ (m)", "Start Ch.", "End Ch."] 
+                        : ["সেকশন", "ক্যাটাগরি", "নাম", "লোকেশন", "দৈর্ঘ্য (m)"];
+                      const rows = assetCategory === 'roads'
+                        ? roadsList.filter(r => assetSectionFilter === 'all' || r.section === assetSectionFilter).map(r => [r.section, r.name, r.length, r.width, r.startCh, r.endCh])
+                        : structuresList.filter(s => assetCategory === 'bridges' ? s.type === 'Bridge' : s.type === 'Building').filter(s => assetSectionFilter === 'all' || s.section === assetSectionFilter).map(s => [s.section, s.type, s.name, s.location, s.length || 0]);
+                      downloadPdfReport("Ranaghat Highway Sub Division", `Asset Inventory Report - ${assetCategory.toUpperCase()}`, headers, rows, `Assets_${assetCategory}`);
+                    }}
+                    className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="PDF Download"
+                  >
+                    <i className="fa-solid fa-file-pdf"></i> PDF
+                  </button>
+
+                  <button 
+                    onClick={() => {
+                      setEditingAsset({ item: null, type: assetCategory === 'roads' ? 'road' : 'structure' });
+                      setShowAssetModal(true);
+                    }}
+                    className="bg-indigo-700 hover:bg-indigo-800 text-white font-bold text-xs px-3 py-2 rounded-xl shadow flex items-center gap-1"
+                  >
+                    <i className="fa-solid fa-plus"></i> নতুন অ্যাসেট যোগ করুন
+                  </button>
                 </div>
               </div>
 
@@ -810,6 +1404,7 @@ export default function App() {
                           <th className="p-3">Start Ch.</th>
                           <th className="p-3">End Ch.</th>
                           <th className="p-3 text-center">ম্যাপ অনুসন্ধান</th>
+                          <th className="p-3 text-center">অ্যাকশন</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
@@ -827,8 +1422,8 @@ export default function App() {
                                   {r.name}
                                 </button>
                               </td>
-                              <td className="p-3">{r.length}</td>
-                              <td className="p-3">{r.width}</td>
+                              <td className="p-3 font-mono">{r.length}</td>
+                              <td className="p-3 font-mono">{r.width}</td>
                               <td className="p-3 font-mono">{r.startCh}</td>
                               <td className="p-3 font-mono">{r.endCh}</td>
                               <td className="p-3 text-center">
@@ -838,6 +1433,24 @@ export default function App() {
                                 >
                                   <i className="fa-solid fa-map-pin"></i> ম্যাপ লোকেশন
                                 </button>
+                              </td>
+                              <td className="p-3 text-center space-x-1.5 whitespace-nowrap">
+                                <button 
+                                  onClick={() => { setEditingAsset({ item: r, type: 'road' }); setShowAssetModal(true); }}
+                                  className="text-indigo-600 hover:text-indigo-900 p-1 font-bold"
+                                  title="এডিট"
+                                >
+                                  <i className="fa-solid fa-pen-to-square"></i>
+                                </button>
+                                {currentUser?.role === 'admin' && (
+                                  <button 
+                                    onClick={() => handleDeleteAsset(r, 'road')}
+                                    className="text-rose-600 hover:text-rose-900 p-1 font-bold"
+                                    title="ট্র্যাশে সরান"
+                                  >
+                                    <i className="fa-solid fa-trash-can"></i>
+                                  </button>
+                                )}
                               </td>
                             </tr>
                           ))}
@@ -881,13 +1494,29 @@ export default function App() {
                                 </button>
                               </td>
                               <td className="p-3 text-slate-600">{s.location}</td>
-                              <td className="p-3 text-center">
+                              <td className="p-3 text-center space-x-1.5 whitespace-nowrap">
                                 <button 
                                   onClick={() => { setMapsQuery(`${s.name}, ${s.location}, Ranaghat, Nadia`); setShowMapsAssistantModal(true); }}
                                   className="bg-indigo-100 hover:bg-indigo-200 text-indigo-950 px-2 py-0.5 rounded text-[10px] font-bold"
                                 >
                                   <i className="fa-solid fa-location-dot"></i> লোকেশন
                                 </button>
+                                <button 
+                                  onClick={() => { setEditingAsset({ item: s, type: 'structure' }); setShowAssetModal(true); }}
+                                  className="text-indigo-600 hover:text-indigo-900 p-1 font-bold"
+                                  title="এডিট"
+                                >
+                                  <i className="fa-solid fa-pen-to-square"></i>
+                                </button>
+                                {currentUser?.role === 'admin' && (
+                                  <button 
+                                    onClick={() => handleDeleteAsset(s, 'structure')}
+                                    className="text-rose-600 hover:text-rose-900 p-1 font-bold"
+                                    title="ট্র্যাশে সরান"
+                                  >
+                                    <i className="fa-solid fa-trash-can"></i>
+                                  </button>
+                                )}
                               </td>
                             </tr>
                           ))}
@@ -907,15 +1536,51 @@ export default function App() {
                   <h2 className="text-base font-bold text-slate-800">টেন্ডার ও বিলিং সেকশন</h2>
                   <p className="text-xs text-slate-500">Tender Processing Flow ও Running Account (RA) Billing</p>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <button 
-                    onClick={() => { setEditingTenderId(null); setShowTenderModal(true); }}
+                    onClick={() => {
+                      const headers = ["Serial", "NIT No", "সেকশন", "কাজের নাম", "EMD (₹)", "আনুমানিক ব্যয় (₹)", "টেন্ডার মূল্য (₹)", "এজেন্সি", "CS Status", "WO Served"];
+                      const rows = tendersList.map(t => [t.serialNo || '', t.nitNo, t.section, t.projectName, t.emdAmount || 0, t.estimatedCost || 0, t.tenderedAmt || 0, t.agency || '', t.csStatus || '', t.woServed || '']);
+                      downloadExcelFile(`Tenders_${new Date().toISOString().slice(0, 10)}`, 'Tenders', headers, rows);
+                    }}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="Export Tenders to Excel"
+                  >
+                    <i className="fa-solid fa-file-excel"></i> টেন্ডার Excel
+                  </button>
+
+                  <button 
+                    onClick={() => {
+                      const headers = ["Tender No", "প্রকল্পের নাম", "Bill No", "FY", "টাকার পরিমাণ (₹)", "MB Details", "তারিখ", "স্ট্যাটাস"];
+                      const rows = billingList.map(b => [b.tenderNo, b.projectName, b.billNo, b.fy, b.amount, b.usedMBs || '', b.date || '', b.status]);
+                      downloadExcelFile(`Billing_${new Date().toISOString().slice(0, 10)}`, 'Billing', headers, rows);
+                    }}
+                    className="bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="Export Billing to Excel"
+                  >
+                    <i className="fa-solid fa-file-invoice-dollar"></i> বিলিং Excel
+                  </button>
+
+                  <button 
+                    onClick={() => {
+                      const headers = ["Tender No", "প্রকল্পের নাম", "Bill No", "FY", "টাকা (₹)", "তারিখ", "স্ট্যাটাস"];
+                      const rows = billingList.map(b => [b.tenderNo, b.projectName, b.billNo, b.fy, b.amount, b.date || '', b.status]);
+                      downloadPdfReport("Ranaghat Highway Sub Division", "Running Account (RA) Billing Report", headers, rows, `Billing_Report`);
+                    }}
+                    className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="PDF Download"
+                  >
+                    <i className="fa-solid fa-file-pdf"></i> PDF
+                  </button>
+
+                  <button 
+                    onClick={() => { setEditingTender(null); setShowTenderModal(true); }}
                     className="bg-indigo-700 hover:bg-indigo-800 text-white font-bold text-xs px-3 py-2 rounded-xl shadow flex items-center gap-1"
                   >
                     <i className="fa-solid fa-plus"></i> নতুন টেন্ডার রেকর্ড
                   </button>
                   <button 
-                    onClick={() => setShowBillingModal(true)}
+                    onClick={() => { setBillingItem(null); setShowBillingModal(true); }}
                     className="bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs px-3 py-2 rounded-xl shadow flex items-center gap-1"
                   >
                     <i className="fa-solid fa-file-invoice"></i> নতুন RA বিল যোগ করুন
@@ -963,17 +1628,35 @@ export default function App() {
                               {t.woServed === 'Yes' ? 'Served' : 'Pending'}
                             </span>
                           </td>
-                          <td className="p-3 text-center">
+                          <td className="p-3 text-center space-x-1.5 whitespace-nowrap">
+                            {t.woServed !== 'Yes' && (
+                              <button 
+                                onClick={async () => {
+                                  const updated = tendersList.map(item => item.id === t.id ? { ...item, woServed: 'Yes', status: 'Completed Tender' } : item);
+                                  setTendersList(updated);
+                                  await syncToCloud('tenders_state', updated);
+                                }}
+                                className="bg-indigo-600 hover:bg-indigo-700 text-white px-2 py-1 rounded text-[10px] font-bold"
+                              >
+                                Serve WO
+                              </button>
+                            )}
                             <button 
-                              onClick={async () => {
-                                const updated = tendersList.map(item => item.id === t.id ? { ...item, woServed: 'Yes', status: 'Completed Tender' } : item);
-                                setTendersList(updated);
-                                await syncToCloud('tenders_state', updated);
-                              }}
-                              className="bg-indigo-600 hover:bg-indigo-700 text-white px-2 py-1 rounded text-[10px] font-bold"
+                              onClick={() => { setEditingTender(t); setShowTenderModal(true); }}
+                              className="text-indigo-600 hover:text-indigo-900 p-1 font-bold"
+                              title="এডিট"
                             >
-                              Serve WO
+                              <i className="fa-solid fa-pen-to-square"></i>
                             </button>
+                            {currentUser?.role === 'admin' && (
+                              <button 
+                                onClick={() => handleDeleteTender(t)}
+                                className="text-rose-600 hover:text-rose-900 p-1 font-bold"
+                                title="ট্র্যাশে সরান"
+                              >
+                                <i className="fa-solid fa-trash-can"></i>
+                              </button>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -1000,6 +1683,7 @@ export default function App() {
                         <th className="p-3">MB Details</th>
                         <th className="p-3">তারিখ</th>
                         <th className="p-3">স্ট্যাটাস</th>
+                        <th className="p-3 text-center">অ্যাকশন</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -1016,6 +1700,24 @@ export default function App() {
                             <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">
                               {b.status}
                             </span>
+                          </td>
+                          <td className="p-3 text-center space-x-1.5 whitespace-nowrap">
+                            <button 
+                              onClick={() => { setBillingItem(b); setShowBillingModal(true); }}
+                              className="text-indigo-600 hover:text-indigo-900 p-1 font-bold"
+                              title="এডিট"
+                            >
+                              <i className="fa-solid fa-pen-to-square"></i>
+                            </button>
+                            {currentUser?.role === 'admin' && (
+                              <button 
+                                onClick={() => handleDeleteBilling(b)}
+                                className="text-rose-600 hover:text-rose-900 p-1 font-bold"
+                                title="ট্র্যাশে সরান"
+                              >
+                                <i className="fa-solid fa-trash-can"></i>
+                              </button>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -1034,7 +1736,7 @@ export default function App() {
                   <h2 className="text-base font-bold text-slate-800">চলমান ও সম্পন্ন প্রকল্প ট্র্যাকিং</h2>
                   <p className="text-xs text-slate-500">DLP Quarters (1st, 2nd, Last) ও সরাসরি প্রজেক্ট হিস্ট্রি</p>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <select 
                     value={projectCategoryFilter} 
                     onChange={(e) => setProjectCategoryFilter(e.target.value as any)}
@@ -1045,16 +1747,54 @@ export default function App() {
                     <option value="completed">সম্পন্ন প্রকল্প (Completed)</option>
                   </select>
                   <button 
-                    onClick={handleExportSheets} 
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3 py-2 rounded-xl shadow"
+                    onClick={() => {
+                      const headers = ["Tender No", "সেকশন", "প্রকল্পের নাম", "রোড/অ্যাসেট", "চেইনেজ শুরু", "চেইনেজ শেষ", "দৈর্ঘ্য (Km)", "এজেন্সি", "টাকা (₹)", "অগ্রগতি (%)", "স্টেজ", "১ম DLP", "২য় DLP", "শেষ DLP"];
+                      const rows = projectsList.filter(p => {
+                        if (projectCategoryFilter === 'ongoing') return p.progress < 100;
+                        if (projectCategoryFilter === 'completed') return p.progress === 100;
+                        return true;
+                      }).map(p => [p.tenderNo, p.section, p.projectName, p.assetName || '', p.startCh, p.endCh, p.length, p.agency || '', p.tenderedAmt, `${p.progress}%`, p.stage, p.dlp1 || '', p.dlp2 || '', p.dlpLast || '']);
+                      downloadExcelFile(`Projects_${projectCategoryFilter}_${new Date().toISOString().slice(0, 10)}`, 'Projects', headers, rows);
+                    }}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="Excel Download"
                   >
-                    <i className="fa-solid fa-file-excel mr-1"></i> Sheets Export
+                    <i className="fa-solid fa-file-excel"></i> Excel
+                  </button>
+                  <button 
+                    onClick={() => {
+                      const headers = ["Tender No", "সেকশন", "প্রকল্পের নাম", "চেইনেজ", "টাকা (₹)", "অগ্রগতি", "স্টেজ"];
+                      const rows = projectsList.filter(p => {
+                        if (projectCategoryFilter === 'ongoing') return p.progress < 100;
+                        if (projectCategoryFilter === 'completed') return p.progress === 100;
+                        return true;
+                      }).map(p => [p.tenderNo, p.section, p.projectName, `${p.startCh}-${p.endCh}`, p.tenderedAmt, `${p.progress}%`, p.stage]);
+                      downloadPdfReport("Ranaghat Highway Sub Division", `Projects Tracking Report (${projectCategoryFilter.toUpperCase()})`, headers, rows, `Projects_${projectCategoryFilter}`);
+                    }}
+                    className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="PDF Download"
+                  >
+                    <i className="fa-solid fa-file-pdf"></i> PDF
+                  </button>
+                  <button 
+                    onClick={handleExportSheets} 
+                    className="bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="Google Sheets Sync"
+                  >
+                    <i className="fa-solid fa-cloud-arrow-up"></i> Sheets Sync
                   </button>
                   <button 
                     onClick={handleExportDocs} 
-                    className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-3 py-2 rounded-xl shadow"
+                    className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="Google Docs Sync"
                   >
-                    <i className="fa-solid fa-file-word mr-1"></i> Docs Report
+                    <i className="fa-solid fa-file-word"></i> Docs Sync
+                  </button>
+                  <button 
+                    onClick={() => { setEditingProject(null); setShowAddProjectModal(true); }}
+                    className="bg-purple-700 hover:bg-purple-800 text-white font-bold text-xs px-3 py-2 rounded-xl shadow flex items-center gap-1"
+                  >
+                    <i className="fa-solid fa-plus"></i> নতুন প্রকল্প যোগ করুন
                   </button>
                 </div>
               </div>
@@ -1106,14 +1846,30 @@ export default function App() {
                                 </div>
                               )}
                             </td>
-                            <td className="p-3 text-center space-x-1">
+                            <td className="p-3 text-center space-x-1.5 whitespace-nowrap">
                               <button 
                                 onClick={() => handleAddToCalendar(p.projectName, p.dlp1 || new Date().toISOString().slice(0, 10))}
                                 title="Add to Google Calendar"
-                                className="px-2 py-0.5 bg-indigo-600 text-white rounded text-[10px] font-bold"
+                                className="px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[10px] font-bold"
                               >
-                                Calendar
+                                <i className="fa-solid fa-calendar-plus mr-0.5"></i> Calendar
                               </button>
+                              <button 
+                                onClick={() => { setEditingProject(p); setShowAddProjectModal(true); }}
+                                className="text-indigo-600 hover:text-indigo-900 p-1 font-bold"
+                                title="এডিট"
+                              >
+                                <i className="fa-solid fa-pen-to-square"></i>
+                              </button>
+                              {currentUser?.role === 'admin' && (
+                                <button 
+                                  onClick={() => handleDeleteProject(p)}
+                                  className="text-rose-600 hover:text-rose-900 p-1 font-bold"
+                                  title="ট্র্যাশে সরান"
+                                >
+                                  <i className="fa-solid fa-trash-can"></i>
+                                </button>
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -1132,12 +1888,38 @@ export default function App() {
                   <h2 className="text-base font-bold text-slate-800">অফিসিয়াল নির্দেশ ও কমপ্লায়েন্স ট্র্যাকিং</h2>
                   <p className="text-xs text-slate-500">নির্দেশ জারি, কমপ্লায়েন্স সাবমিশন এবং রিয়েল-টাইম ক্লাউড সিঙ্ক</p>
                 </div>
-                <button 
-                  onClick={() => setShowInstructionModal(true)}
-                  className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow flex items-center gap-1.5"
-                >
-                  <i className="fa-solid fa-bullhorn"></i> নতুন নির্দেশ জারি করুন
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button 
+                    onClick={() => {
+                      const headers = ["ID", "প্রাপক", "সেকশন", "রেফারেন্স", "বিষয়", "ইস্যু তারিখ", "রিমাইন্ডার তারিখ", "স্ট্যাটাস", "কমপ্লায়েন্স রিপোর্ট", "GPS"];
+                      const rows = instructionsList.map(i => [i.id, i.targetStaff, i.section, i.projectRef, i.subject, i.issueDate, i.reminderDate, i.status, i.replyText || '', i.gps || '']);
+                      downloadExcelFile(`Instructions_${new Date().toISOString().slice(0, 10)}`, 'Instructions', headers, rows);
+                    }}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="Excel Download"
+                  >
+                    <i className="fa-solid fa-file-excel"></i> Excel
+                  </button>
+
+                  <button 
+                    onClick={() => {
+                      const headers = ["প্রাপক", "সেকশন", "বিষয়", "ইস্যু", "রিমাইন্ডার", "স্ট্যাটাস"];
+                      const rows = instructionsList.map(i => [i.targetStaff, i.section, i.subject, i.issueDate, i.reminderDate, i.status]);
+                      downloadPdfReport("Ranaghat Highway Sub Division", "Official Instructions & Compliance Log", headers, rows, `Instructions_Report`);
+                    }}
+                    className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="PDF Download"
+                  >
+                    <i className="fa-solid fa-file-pdf"></i> PDF
+                  </button>
+
+                  <button 
+                    onClick={() => setShowInstructionModal(true)}
+                    className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow flex items-center gap-1.5"
+                  >
+                    <i className="fa-solid fa-bullhorn"></i> নতুন নির্দেশ জারি করুন
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -1169,7 +1951,7 @@ export default function App() {
 
                       <div className="flex flex-wrap justify-between items-center pt-2 border-t border-slate-100 gap-2 text-[11px]">
                         <span className="text-slate-500">রিমাইন্ডার তারিখ: <strong>{ins.reminderDate}</strong></span>
-                        <div className="flex gap-2">
+                        <div className="flex items-center gap-2">
                           <button 
                             onClick={() => handleAddToTasks(ins.subject, `প্রাপক: ${ins.targetStaff}`, ins.reminderDate)}
                             className="bg-indigo-600 hover:bg-indigo-700 text-white px-2 py-1 rounded text-[10px] font-bold"
@@ -1183,6 +1965,15 @@ export default function App() {
                           >
                             <i className="fa-brands fa-whatsapp"></i> WhatsApp
                           </a>
+                          {currentUser?.role === 'admin' && (
+                            <button 
+                              onClick={() => handleDeleteInstruction(ins)}
+                              className="text-rose-600 hover:text-rose-800 p-1 font-bold text-xs"
+                              title="ট্র্যাশে সরান"
+                            >
+                              <i className="fa-solid fa-trash-can"></i>
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1244,12 +2035,38 @@ export default function App() {
                   <h2 className="text-base font-bold text-slate-800">Work Flow</h2>
                   <p className="text-xs text-slate-500">চিঠী-পত্র আদান-প্রদান ও লেটার ট্র্যাকিং</p>
                 </div>
-                <button 
-                  onClick={() => setShowWorkflowModal(true)}
-                  className="bg-sky-700 hover:bg-sky-800 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow"
-                >
-                  <i className="fa-solid fa-plus mr-1"></i> নতুন চিঠী-পত্র
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button 
+                    onClick={() => {
+                      const headers = ["Memo No", "তারিখ", "প্রকল্প / কাজ", "From", "To", "বিষয়", "স্ট্যাটাস"];
+                      const rows = workflowList.map(w => [w.memoNo, w.date, w.project, w.from, w.to, w.subject, w.status]);
+                      downloadExcelFile(`Workflow_${new Date().toISOString().slice(0, 10)}`, 'Workflow', headers, rows);
+                    }}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="Excel Download"
+                  >
+                    <i className="fa-solid fa-file-excel"></i> Excel
+                  </button>
+
+                  <button 
+                    onClick={() => {
+                      const headers = ["Memo No", "তারিখ", "প্রকল্প", "From", "To", "বিষয়", "স্ট্যাটাস"];
+                      const rows = workflowList.map(w => [w.memoNo, w.date, w.project, w.from, w.to, w.subject, w.status]);
+                      downloadPdfReport("Ranaghat Highway Sub Division", "Work Flow Correspondence Register", headers, rows, `Workflow_Report`);
+                    }}
+                    className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="PDF Download"
+                  >
+                    <i className="fa-solid fa-file-pdf"></i> PDF
+                  </button>
+
+                  <button 
+                    onClick={() => { setEditingWorkflow(null); setShowWorkflowModal(true); }}
+                    className="bg-sky-700 hover:bg-sky-800 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow flex items-center gap-1"
+                  >
+                    <i className="fa-solid fa-plus mr-1"></i> নতুন চিঠী-পত্র
+                  </button>
+                </div>
               </div>
 
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
@@ -1264,6 +2081,7 @@ export default function App() {
                         <th className="p-3">To</th>
                         <th className="p-3">বিষয়</th>
                         <th className="p-3">স্ট্যাটাস</th>
+                        <th className="p-3 text-center">অ্যাকশন</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -1280,6 +2098,24 @@ export default function App() {
                               {w.status}
                             </span>
                           </td>
+                          <td className="p-3 text-center space-x-1.5 whitespace-nowrap">
+                            <button 
+                              onClick={() => { setEditingWorkflow(w); setShowWorkflowModal(true); }}
+                              className="text-indigo-600 hover:text-indigo-900 p-1 font-bold"
+                              title="এডিট"
+                            >
+                              <i className="fa-solid fa-pen-to-square"></i>
+                            </button>
+                            {currentUser?.role === 'admin' && (
+                              <button 
+                                onClick={() => handleDeleteWorkflow(w)}
+                                className="text-rose-600 hover:text-rose-900 p-1 font-bold"
+                                title="ট্র্যাশে সরান"
+                              >
+                                <i className="fa-solid fa-trash-can"></i>
+                              </button>
+                            )}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -1292,9 +2128,43 @@ export default function App() {
           {/* TAB 8: SD OFFICE FILES */}
           {activeTab === 'sdoffice' && (
             <div className="space-y-4">
-              <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-                <h2 className="text-base font-bold text-slate-800">SD Office Section (বড়বাবু ম্যানেজমেন্ট)</h2>
-                <p className="text-xs text-slate-500">অফিসিয়াল ফাইল ট্র্যাকিং ও মেমো ডিসপ্যাচ</p>
+              <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-wrap justify-between items-center gap-3">
+                <div>
+                  <h2 className="text-base font-bold text-slate-800">SD Office Section (বড়বাবু ম্যানেজমেন্ট)</h2>
+                  <p className="text-xs text-slate-500">অফিসিয়াল ফাইল ট্র্যাকিং ও মেমো ডিসপ্যাচ</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button 
+                    onClick={() => {
+                      const headers = ["File / Memo No", "তারিখ", "বিষয়", "প্রেরক / প্রাপক", "ক্যাটাগরি", "স্ট্যাটাস"];
+                      const rows = sdOfficeList.map(f => [f.memoNo, f.date, f.subject, f.senderReceiver, f.category, f.status]);
+                      downloadExcelFile(`SD_Office_${new Date().toISOString().slice(0, 10)}`, 'SD_Office', headers, rows);
+                    }}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="Excel Download"
+                  >
+                    <i className="fa-solid fa-file-excel"></i> Excel
+                  </button>
+
+                  <button 
+                    onClick={() => {
+                      const headers = ["File / Memo No", "তারিখ", "বিষয়", "প্রেরক / প্রাপক", "ক্যাটাগরি", "স্ট্যাটাস"];
+                      const rows = sdOfficeList.map(f => [f.memoNo, f.date, f.subject, f.senderReceiver, f.category, f.status]);
+                      downloadPdfReport("Ranaghat Highway Sub Division", "SD Office File Tracking Register", headers, rows, `SD_Office_Report`);
+                    }}
+                    className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-2.5 py-2 rounded-xl shadow flex items-center gap-1"
+                    title="PDF Download"
+                  >
+                    <i className="fa-solid fa-file-pdf"></i> PDF
+                  </button>
+
+                  <button 
+                    onClick={() => { setEditingSDOffice(null); setShowSecurityModal(true); }}
+                    className="bg-indigo-700 hover:bg-indigo-800 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow flex items-center gap-1"
+                  >
+                    <i className="fa-solid fa-plus mr-1"></i> নতুন নথি যোগ করুন
+                  </button>
+                </div>
               </div>
 
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
@@ -1308,6 +2178,7 @@ export default function App() {
                         <th className="p-3">প্রেরক / প্রাপক</th>
                         <th className="p-3">ক্যাটাগরি</th>
                         <th className="p-3">স্ট্যাটাস</th>
+                        <th className="p-3 text-center">অ্যাকশন</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -1323,12 +2194,110 @@ export default function App() {
                               {f.status}
                             </span>
                           </td>
+                          <td className="p-3 text-center space-x-1.5 whitespace-nowrap">
+                            <button 
+                              onClick={() => { setEditingSDOffice(f); setShowSecurityModal(true); }}
+                              className="text-indigo-600 hover:text-indigo-900 p-1 font-bold"
+                              title="এডিট"
+                            >
+                              <i className="fa-solid fa-pen-to-square"></i>
+                            </button>
+                            {currentUser?.role === 'admin' && (
+                              <button 
+                                onClick={() => handleDeleteSDOffice(f)}
+                                className="text-rose-600 hover:text-rose-900 p-1 font-bold"
+                                title="ট্র্যাশে সরান"
+                              >
+                                <i className="fa-solid fa-trash-can"></i>
+                              </button>
+                            )}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* TAB: TRASH BIN (ADMIN ONLY) */}
+          {activeTab === 'trash' && currentUser?.role === 'admin' && (
+            <div className="space-y-4">
+              <div className="bg-white p-4 rounded-2xl border border-rose-200 shadow-sm flex flex-wrap justify-between items-center gap-3">
+                <div>
+                  <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
+                    <i className="fa-solid fa-trash-can text-rose-600"></i> ট্র্যাশ বিন (মুছে ফেলা রেকর্ডসমূহ)
+                  </h2>
+                  <p className="text-xs text-slate-500">যেকোনো মুছে ফেলা রেকর্ড এখানে সংরক্ষিত থাকে। শুধুমাত্র এডমিন পুনরুদ্ধার করতে পারেন বা স্থায়ীভাবে মুছতে পারেন।</p>
+                </div>
+                {trashList.length > 0 && (
+                  <button 
+                    onClick={handleEmptyTrash}
+                    className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow flex items-center gap-1.5"
+                  >
+                    <i className="fa-solid fa-fire"></i> সমস্ত ট্র্যাশ খালি করুন
+                  </button>
+                )}
+              </div>
+
+              {trashList.length === 0 ? (
+                <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center space-y-2">
+                  <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto text-slate-400 text-2xl">
+                    <i className="fa-regular fa-trash-can"></i>
+                  </div>
+                  <h3 className="font-bold text-slate-700 text-sm">ট্র্যাশ বিন সম্পূর্ণ খালি</h3>
+                  <p className="text-xs text-slate-400">কোনো রেকর্ড মুছে ফেলা হয়নি।</p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-rose-950 text-white uppercase text-[10px]">
+                        <tr>
+                          <th className="p-3">ধরণ (Type)</th>
+                          <th className="p-3">রেকর্ডের নাম / বিবরণ</th>
+                          <th className="p-3">মুছে ফেলার তারিখ ও সময়</th>
+                          <th className="p-3">কে মুছেছেন</th>
+                          <th className="p-3 text-center">অ্যাকশন</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {trashList.map((item, idx) => (
+                          <tr key={idx} className="hover:bg-rose-50/30">
+                            <td className="p-3">
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-100 text-slate-800">
+                                {item.itemType}
+                              </span>
+                            </td>
+                            <td className="p-3 font-bold text-slate-800">{item.title}</td>
+                            <td className="p-3 font-mono text-slate-500">
+                              {new Date(item.deletedAt).toLocaleString('en-IN')}
+                            </td>
+                            <td className="p-3 text-slate-700">{item.deletedBy}</td>
+                            <td className="p-3 text-center space-x-2 whitespace-nowrap">
+                              <button 
+                                onClick={() => handleRestoreFromTrash(item)}
+                                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-2.5 py-1 rounded-lg shadow"
+                                title="মূল তালিকায় পুনরুদ্ধার করুন"
+                              >
+                                <i className="fa-solid fa-rotate-left mr-1"></i> পুনরুদ্ধার
+                              </button>
+                              <button 
+                                onClick={() => handlePermanentDelete(item)}
+                                className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-2.5 py-1 rounded-lg shadow"
+                                title="স্থায়ীভাবে মুছে ফেলুন"
+                              >
+                                <i className="fa-solid fa-trash-can mr-1"></i> স্থায়ী ডিলিট
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -1605,6 +2574,69 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ================= MODAL: CONFIRMATION (DOUBLE CONFIRM) ================= */}
+      <ConfirmationModal
+        isOpen={confirmState.isOpen}
+        title={confirmState.title}
+        message={confirmState.message}
+        actionType={confirmState.actionType}
+        itemName={confirmState.itemName}
+        doubleConfirmRequired={confirmState.doubleConfirmRequired}
+        onConfirm={confirmState.onConfirm}
+        onCancel={() => setConfirmState(prev => ({ ...prev, isOpen: false }))}
+      />
+
+      {/* ================= MODAL: PROJECT (ADD / EDIT) ================= */}
+      <ProjectModal
+        isOpen={showAddProjectModal}
+        onClose={() => { setShowAddProjectModal(false); setEditingProject(null); }}
+        onSave={handleSaveProject}
+        initialData={editingProject}
+        roadsList={roadsList}
+      />
+
+      {/* ================= MODAL: TENDER (ADD / EDIT) ================= */}
+      <TenderModal
+        isOpen={showTenderModal}
+        onClose={() => { setShowTenderModal(false); setEditingTender(null); }}
+        onSave={handleSaveTender}
+        initialData={editingTender}
+      />
+
+      {/* ================= MODAL: BILLING (ADD / EDIT) ================= */}
+      <BillingModal
+        isOpen={showBillingModal}
+        onClose={() => { setShowBillingModal(false); setBillingItem(null); }}
+        onSave={handleSaveBilling}
+        initialData={editingBilling}
+        projectsList={projectsList}
+      />
+
+      {/* ================= MODAL: WORKFLOW (ADD / EDIT) ================= */}
+      <WorkflowModal
+        isOpen={showWorkflowModal}
+        onClose={() => { setShowWorkflowModal(false); setEditingWorkflow(null); }}
+        onSave={handleSaveWorkflow}
+        initialData={editingWorkflow}
+      />
+
+      {/* ================= MODAL: SD OFFICE (ADD / EDIT) ================= */}
+      <SDOfficeModal
+        isOpen={showSecurityModal}
+        onClose={() => { setShowSecurityModal(false); setEditingSDOffice(null); }}
+        onSave={handleSaveSDOffice}
+        initialData={editingSDOffice}
+      />
+
+      {/* ================= MODAL: ASSET (ADD / EDIT) ================= */}
+      <AssetModal
+        isOpen={showAssetModal}
+        onClose={() => { setShowAssetModal(false); setEditingAsset({ item: null, type: 'road' }); }}
+        onSave={handleSaveAsset}
+        initialData={editingAsset.item}
+        assetType={editingAsset.type}
+      />
 
     </div>
   );

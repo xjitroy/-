@@ -8,6 +8,7 @@ export interface StaffMember {
 }
 
 export interface RoadAsset {
+  id?: string;
   section: string;
   name: string;
   length: number;
@@ -17,11 +18,13 @@ export interface RoadAsset {
 }
 
 export interface StructureAsset {
+  id?: string;
   section: string;
   type: 'Bridge' | 'Building';
   name: string;
   length: number;
   location: string;
+  spanCount?: number;
 }
 
 export interface ProjectRecord {
@@ -49,6 +52,7 @@ export interface ProjectRecord {
   dlp2?: string;
   dlpLast?: string;
   remarks?: string;
+  lastUpdated?: string;
   workOrderData?: string;
   workOrderName?: string;
   workOrderType?: string;
@@ -80,6 +84,7 @@ export interface TenderRecord {
   endCh?: string;
   length?: number;
   estAmt?: number;
+  estimatedCost?: number;
   nitNo?: string;
   tenderNo?: string;
   workOrderNo?: string;
@@ -93,6 +98,7 @@ export interface TenderRecord {
   droppingLastDate?: string;
   openingDate?: string;
   webPublishDate?: string;
+  publishDate?: string;
   paperName?: string;
   paperPublishDate?: string;
   csSentDate?: string;
@@ -107,6 +113,7 @@ export interface TenderRecord {
   tenderNoticeName?: string;
   workOrderData?: string;
   workOrderName?: string;
+  woDate?: string;
   woServed?: string;
   status: string;
   action?: string;
@@ -183,10 +190,23 @@ export interface WorkflowItem {
 }
 
 export interface SDOfficeFile {
+  id?: string;
   memoNo: string;
   date: string;
   subject: string;
   senderReceiver: string;
   category: string;
   status: string;
+  fileLink?: string;
+}
+
+export interface TrashItem {
+  id: string;
+  itemType: 'project' | 'tender' | 'billing' | 'instruction' | 'workflow' | 'sdoffice' | 'road' | 'structure';
+  type?: 'project' | 'tender' | 'billing' | 'instruction' | 'workflow' | 'sdoffice' | 'road' | 'structure';
+  title: string;
+  deletedBy: string;
+  deletedAt: string;
+  originalId?: string;
+  data: any;
 }

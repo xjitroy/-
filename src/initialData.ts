@@ -7,7 +7,8 @@ import {
   BillingRecord, 
   InstructionRecord, 
   WorkflowItem, 
-  SDOfficeFile 
+  SDOfficeFile,
+  TrashItem
 } from './types';
 
 export const initialStaff: StaffMember[] = [
@@ -226,3 +227,5 @@ export const initialSDOffice: SDOfficeFile[] = [
     status: "Received & Processed" 
   }
 ];
+
+export const initialTrash: TrashItem[] = [];
