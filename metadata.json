@@ -1,0 +1,10 @@
+{
+  "name": "আমার অফিস - Ranaghat Highway Sub Division (PWRDTE)",
+  "description": "PWDTE Ranaghat Highway Sub Division এর রোড ও ইনফ্রা অ্যাসেট, টেন্ডার, বিলিং, চলমান ও সম্পন্ন প্রজেক্ট, সিকিউরিটি ডিপোজিট ও কমপ্লায়েন্স ম্যানেজমেন্ট ওয়েব অ্যাপ",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,62 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Roads catalog
+    match /roads/{roadId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    // Structures (bridges & buildings)
+    match /structures/{structureId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    // Projects
+    match /projects/{projectId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    // Tenders
+    match /tenders/{tenderId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    // Billing
+    match /bills/{billId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    // Instructions & Compliances
+    match /instructions/{instructionId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    // Workflow
+    match /workflow/{workflowId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    // System state sync
+    match /system/{docId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+  }
+}

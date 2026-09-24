@@ -1,0 +1,152 @@
+{
+  "entities": {
+    "Road": {
+      "title": "Road",
+      "description": "Road infrastructure under the sub division",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "section": { "type": "string" },
+        "name": { "type": "string" },
+        "length": { "type": "number" },
+        "width": { "type": "string" },
+        "startCh": { "type": "string" },
+        "endCh": { "type": "string" }
+      },
+      "required": ["section", "name"]
+    },
+    "Structure": {
+      "title": "Structure",
+      "description": "Bridges, culverts and buildings in the sub division",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "section": { "type": "string" },
+        "type": { "type": "string" },
+        "name": { "type": "string" },
+        "length": { "type": "number" },
+        "location": { "type": "string" }
+      },
+      "required": ["section", "type", "name"]
+    },
+    "Project": {
+      "title": "Project",
+      "description": "Ongoing and completed engineering works",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "section": { "type": "string" },
+        "assetName": { "type": "string" },
+        "projectName": { "type": "string" },
+        "startCh": { "type": "string" },
+        "endCh": { "type": "string" },
+        "length": { "type": "number" },
+        "fy": { "type": "string" },
+        "tenderNo": { "type": "string" },
+        "workOrderNo": { "type": "string" },
+        "agency": { "type": "string" },
+        "quotedRate": { "type": "string" },
+        "tenderedAmt": { "type": "number" },
+        "progress": { "type": "number" },
+        "stage": { "type": "string" },
+        "remarks": { "type": "string" }
+      },
+      "required": ["section", "projectName"]
+    },
+    "Tender": {
+      "title": "Tender",
+      "description": "Tenders pipeline and notices",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "section": { "type": "string" },
+        "projectName": { "type": "string" },
+        "nitNo": { "type": "string" },
+        "tenderAuthority": { "type": "string" },
+        "emdAmount": { "type": "number" },
+        "woServed": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["section", "projectName"]
+    },
+    "Billing": {
+      "title": "Billing",
+      "description": "Running account bills and payment processing",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "tenderNo": { "type": "string" },
+        "projectName": { "type": "string" },
+        "billNo": { "type": "string" },
+        "amount": { "type": "number" },
+        "fy": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["projectName", "billNo"]
+    },
+    "Instruction": {
+      "title": "Instruction",
+      "description": "Official instructions and compliance reports",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "targetStaff": { "type": "string" },
+        "section": { "type": "string" },
+        "projectRef": { "type": "string" },
+        "subject": { "type": "string" },
+        "issueDate": { "type": "string" },
+        "reminderDate": { "type": "string" },
+        "status": { "type": "string" },
+        "replyText": { "type": "string" },
+        "gps": { "type": "string" }
+      },
+      "required": ["targetStaff", "subject"]
+    },
+    "WorkflowItem": {
+      "title": "WorkflowItem",
+      "description": "Letters and dispatch communication workflow",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "memoNo": { "type": "string" },
+        "date": { "type": "string" },
+        "project": { "type": "string" },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "subject": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["subject"]
+    }
+  },
+  "firestore": {
+    "/roads/{roadId}": {
+      "schema": "Road",
+      "description": "Roads in Ranaghat Highway Sub Division"
+    },
+    "/structures/{structureId}": {
+      "schema": "Structure",
+      "description": "Bridges and buildings"
+    },
+    "/projects/{projectId}": {
+      "schema": "Project",
+      "description": "Ongoing and completed works"
+    },
+    "/tenders/{tenderId}": {
+      "schema": "Tender",
+      "description": "Tenders pipeline"
+    },
+    "/bills/{billId}": {
+      "schema": "Billing",
+      "description": "Billing records"
+    },
+    "/instructions/{instructionId}": {
+      "schema": "Instruction",
+      "description": "Official instructions and field compliance"
+    },
+    "/workflow/{workflowId}": {
+      "schema": "WorkflowItem",
+      "description": "Letters and workflow dispatches"
+    }
+  }
+}
